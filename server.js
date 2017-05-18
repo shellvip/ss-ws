@@ -15,4 +15,8 @@ var relay = new TcpRelay({
     method: server.method || 'aes-256-cfb'
 }, false);
 
-relay.initServer();
+relay.initServer().then(()=>{
+    console.log('Init server ok.');
+}, ()=>{
+    console.log('Init server error.');
+});

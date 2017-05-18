@@ -1,5 +1,6 @@
 const net = require('net');
 const path = require('path');
+const http = require('http');
 const WebSocket = require('ws');
 const Encryptor = require('shadowsocks/lib/shadowsocks/encrypt').Encryptor;
 const WSErrorCode = require('ws/lib/ErrorCodes');
@@ -66,8 +67,6 @@ const SERVER_STATUS_INIT = 0;
 const SERVER_STATUS_RUNNING = 1;
 const SERVER_STATUS_STOPPED = 2;
 
-var globalConnectionId = 1;
-var connections = {};
 
 function parseAddressHeader(data, offset) {
     var addressType = data.readUInt8(offset);
@@ -104,11 +103,6 @@ module.exports = class TcpRelay {
         if (config) {
             this.config = Object.assign(this.config, config);
         }
-        this.serverName = null;
-    }
-
-    getStatus() {
-        return this.status;
     }
 
     initServer() {
@@ -120,109 +114,115 @@ module.exports = class TcpRelay {
             var server;
 
             if (self.isLocal) {
-                server = self.server = net.createServer({
-                    allowHalfOpen: true,
-                });
-                server.maxConnections = MAX_CONNECTIONS;
+                server = self.server = net.createServer();
                 server.on('connection', function (connection) {
                     return self.handleConnectionByLocal(connection);
                 });
-                server.on('close', function () {
-                    self.status = SERVER_STATUS_STOPPED;
-                });
-                server.listen(port, address);
             } else {
-                server = self.server = new WebSocket.Server({
-                    host: address,
-                    port: port,
-                    perMessageDeflate: false
+                server = self.server = http.createServer((req, res) => {
+                    res.writeHead(200, { 'Content-Type': 'text/plain' });
+                    return res.end("Hello world.");
                 });
-                server.on('connection', function (connection) {
-                    return self.handleConnectionByServer(connection);
+                var wss = new WebSocket.Server({ server });
+                wss.on('connection', function (ws) {
+                    return self.handleConnectionByServer(ws);
                 });
             }
+            server.listen(port, address, () => {
+                self.status = SERVER_STATUS_RUNNING;
+                resolve();
+            });
             server.on('error', function (error) {
                 self.status = SERVER_STATUS_STOPPED;
                 reject(error);
             });
-            server.on('listening', function () {
-                self.status = SERVER_STATUS_RUNNING;
-                resolve();
-            });
         });
     }
 
-    handleConnectionByServer(connection) {
+    handleConnectionByServer(ws) {
         var config = this.config;
         var method = config.method;
         var password = config.password;
         var serverAddress = config.serverAddress;
         var serverPort = config.serverPort;
 
+        console.log("server connected");
+
         var encryptor = new Encryptor(password, method);
 
         var stage = STAGE_INIT;
-        var connectionId = (globalConnectionId++) % MAX_CONNECTIONS;
-        var targetConnection, addressHeader;
+        var remote, addressHeader;
 
         var dataCache = [];
 
-        connections[connectionId] = connection;
-        connection.on('message', function (data) {
+        ws.on('message', function (data, flags) {
             data = encryptor.decrypt(data);
-
             switch (stage) {
-
                 case STAGE_INIT:
-                    if (data.length < 7) {
-                        stage = STAGE_DESTROYED;
-                        return connection.close();
-                    }
-                    addressHeader = parseAddressHeader(data, 0);
-                    if (!addressHeader) {
-                        stage = STAGE_DESTROYED;
-                        return connection.close();
-                    }
-
-                    stage = STAGE_CONNECTING;
-
-                    targetConnection = net.createConnection({
-                        port: addressHeader.dstPort,
-                        host: addressHeader.dstAddr,
-                        allowHalfOpen: true
-                    }, function () {
-
-                        dataCache = Buffer.concat(dataCache);
-                        targetConnection.write(dataCache, function () {
-                            dataCache = null;
-                        });
-                        stage = STAGE_STREAM;
-                    });
-
-                    targetConnection.on('data', function (data) {
-                        if (connection.readyState == WebSocket.OPEN) {
-                            connection.send(encryptor.encrypt(data), {
-                                binary: true
-                            }, function () {
-                            });
+                    try {
+                        if (data.length < 7) {
+                            stage = STAGE_DESTROYED;
+                            return ws.close();
                         }
-                    });
-                    targetConnection.on('end', function () {
-                        stage = STAGE_DESTROYED;
-                        connection.close();
-                    });
-                    targetConnection.on('close', function (hadError) {
-                        stage = STAGE_DESTROYED;
-                        connection.close();
-                    });
-                    targetConnection.on('error', function (error) {
-                        stage = STAGE_DESTROYED;
-                        targetConnection.destroy();
-                        connection.close();
-                    });
+                        addressHeader = parseAddressHeader(data, 0);
+                        if (!addressHeader) {
+                            stage = STAGE_DESTROYED;
+                            return ws.close();
+                        }
 
-                    if (data.length > addressHeader.headerLen) {
-                        dataCache.push(data.slice(addressHeader.headerLen));
+                        stage = STAGE_CONNECTING;
+
+                        remote = net.connect(addressHeader.dstPort, addressHeader.dstAddr, () => {
+                            console.log(`connecting ${addressHeader.dstAddr}`);
+                            dataCache = Buffer.concat(dataCache);
+                            remote.write(dataCache, () => {
+                                dataCache = null;
+                            });
+                            stage = STAGE_STREAM;
+                        });
+
+                        remote.on('data', function (data) {
+                            if (ws.readyState == WebSocket.OPEN) {
+                                ws.send(encryptor.encrypt(data), {
+                                    binary: true
+                                });
+                                if (ws.bufferedAmount > 0) {
+                                    remote.pause();
+                                }
+                            }
+                        });
+                        remote.on('end', function () {
+                            stage = STAGE_DESTROYED;
+                            ws.close();
+                            console.log("remote disconnected");
+                        });
+                        remote.on('close', function (hadError) {
+                            stage = STAGE_DESTROYED;
+                            ws.close();
+                        });
+                        remote.on("drain", function () {
+                            ws._socket.resume();
+                        });
+                        remote.on('error', function (error) {
+                            stage = STAGE_DESTROYED;
+                            remote.destroy();
+                            ws.terminate();
+                        });
+                        remote.setTimeout(Math.floor(600 * 1000), () => {
+                            console.log("remote timeout");
+                            remote.destroy();
+                            ws.close();
+                        });
+
+                        if (data.length > addressHeader.headerLen) {
+                            dataCache.push(data.slice(addressHeader.headerLen));
+                        }
+                    } catch (error) {
+                        console.warn(error);
+                        if (remote) {
+                            remote.destroy();
+                        }
+                        ws.close();
                     }
                     break;
 
@@ -231,19 +231,24 @@ module.exports = class TcpRelay {
                     break;
 
                 case STAGE_STREAM:
-                    targetConnection.write(data, function () {
-                    });
+                    if (!remote.write(data)) {
+                        ws._socket.pause();
+                    }
                     break;
             }
         });
-        connection.on('close', function (code, reason) {
-            connections[connectionId] = null;
-            targetConnection && targetConnection.destroy();
+        ws.on('close', function (code, reason) {
+            console.log("server disconnected");
+            if (remote) {
+                return remote.destroy();
+            }
         });
-        connection.on('error', function (error) {
-            connection.terminate();
-            connections[connectionId] = null;
-            targetConnection && targetConnection.end();
+
+        ws.on('error', function (error) {
+            console.warn("server: " + e);
+            if (remote) {
+                return remote.destroy();
+            }
         });
     }
 
@@ -254,17 +259,16 @@ module.exports = class TcpRelay {
         var serverAddress = config.serverAddress;
         var serverPort = config.serverPort;
 
+        console.log("local connected");
+
         var encryptor = new Encryptor(password, method);
 
         var stage = STAGE_INIT;
-        var connectionId = (globalConnectionId++) % MAX_CONNECTIONS;
-        var serverConnection, cmd, addressHeader;
+        var ws, cmd, addressHeader, ping;
 
         var canWriteToLocalConnection = true;
         var dataCache = [];
 
-        connections[connectionId] = connection;
-        connection.setKeepAlive(false);
         connection.on('data', function (data) {
             switch (stage) {
 
@@ -278,57 +282,75 @@ module.exports = class TcpRelay {
                     break;
 
                 case STAGE_ADDR:
-                    if (data.length < 10 || data.readUInt8(0) != 5) {
-                        stage = STAGE_DESTROYED;
-                        return connection.end();
-                    }
-                    cmd = data.readUInt8(1);
-                    addressHeader = parseAddressHeader(data, 3);
-                    if (!addressHeader) {
-                        stage = STAGE_DESTROYED;
-                        return connection.end();
-                    }
+                    try {
+                        if (data.length < 10 || data.readUInt8(0) != 5) {
+                            stage = STAGE_DESTROYED;
+                            return connection.end();
+                        }
+                        cmd = data.readUInt8(1);
+                        addressHeader = parseAddressHeader(data, 3);
+                        if (!addressHeader) {
+                            stage = STAGE_DESTROYED;
+                            return connection.end();
+                        }
 
-                    //only supports connect cmd
-                    if (cmd != CMD_CONNECT) {
-                        stage = STAGE_DESTROYED;
-                        return connection.end("\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00");
-                    }
+                        //only supports connect cmd
+                        if (cmd != CMD_CONNECT) {
+                            stage = STAGE_DESTROYED;
+                            return connection.end("\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00");
+                        }
 
-                    connection.write("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00");
+                        connection.write("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00");
 
-                    stage = STAGE_CONNECTING;
+                        stage = STAGE_CONNECTING;
 
-                    serverConnection = new WebSocket('ws://' + serverAddress + ':' + serverPort, {
-                        perMessageDeflate: false
-                    });
-                    serverConnection.on('open', function () {
-                        serverConnection.send(encryptor.encrypt(data.slice(3)), function () {
-                            stage = STAGE_STREAM;
-                            dataCache = Buffer.concat(dataCache);
-                            serverConnection.send(encryptor.encrypt(dataCache), {
-                                binary: true
-                            }, function () {
-                                dataCache = null;
+                        ws = new WebSocket('ws://' + serverAddress + ':' + serverPort, {
+                            protocol: "binary"
+                        });
+                        ws.on('open', function () {
+                            ws._socket.on("error", function (e) {
+                                connection.destroy();
+                            });
+                            ws.send(encryptor.encrypt(data.slice(3)), function () {
+                                stage = STAGE_STREAM;
+                                dataCache = Buffer.concat(dataCache);
+                                ws.send(encryptor.encrypt(dataCache), {
+                                    binary: true
+                                }, function () {
+                                    dataCache = null;
+                                });
+                            });
+                            ping = setInterval(function () {
+                                return ws.ping("", null, true);
+                            }, 50 * 1000);
+                            ws._socket.on("drain", function () {
+                                return connection.resume();
                             });
                         });
-                    });
-                    serverConnection.on('message', function (data) {
-                        canWriteToLocalConnection && connection.write(encryptor.decrypt(data), function () {
+                        ws.on('message', function (data, flags) {
+                            if (!connection.write(encryptor.decrypt(data))) {
+                                return ws._socket.pause();
+                            }
                         });
-                    });
-                    serverConnection.on('error', function (error) {
-                        stage = STAGE_DESTROYED;
-                        connection.end();
-                    });
-                    serverConnection.on('close', function (code, reason) {
-                        stage = STAGE_DESTROYED;
-                        connection.end();
-                    });
+                        ws.on('close', function (code, reason) {
+                            stage = STAGE_DESTROYED;
+                            clearInterval(ping);
+                            console.log("remote disconnected");
+                            connection.destroy();
+                        });
+                        ws.on('error', function (error) {
+                            stage = STAGE_DESTROYED;
+                            connection.destroy();
+                        });
 
-                    if (data.length > addressHeader.headerLen + 3) {
-                        dataCache.push(data.slice(addressHeader.headerLen + 3));
+                        if (data.length > addressHeader.headerLen + 3) {
+                            dataCache.push(data.slice(addressHeader.headerLen + 3));
+                        }
+                    } catch (error) {
+                        console.log(error);
+                        return connection.destroy();
                     }
+
                     break;
 
                 case STAGE_CONNECTING:
@@ -336,47 +358,50 @@ module.exports = class TcpRelay {
                     break;
 
                 case STAGE_STREAM:
-                    canWriteToLocalConnection && serverConnection.send(encryptor.encrypt(data), {
-                        binary: true
-                    }, function () {
-                    });
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(encryptor.encrypt(data), {
+                            binary: true
+                        });
+                        if (ws.bufferedAmount > 0) {
+                            connection.pause();
+                        }
+                    }
                     break;
             }
         });
         connection.on('end', function () {
             stage = STAGE_DESTROYED;
+            console.log("local disconnected");
+            if (ws) {
+                ws.terminate();
+            }
         });
         connection.on('close', function (hadError) {
             stage = STAGE_DESTROYED;
-            canWriteToLocalConnection = false;
-            connections[connectionId] = null;
-            serverConnection && serverConnection.terminate();
+            console.log("local disconnected");
+            if (ws) {
+                ws.terminate();
+            }
         });
         connection.on('error', function (error) {
             stage = STAGE_DESTROYED;
             connection.destroy();
-            canWriteToLocalConnection = false;
-            connections[connectionId] = null;
-            serverConnection && serverConnection.close();
+            if (ws) {
+                ws.terminate();
+            }
         });
-    }
-    stop() {
-        var connId = null;
-        return new Promise(function (resolve, reject) {
-            if (this.server) {
-                this.server.close(function () {
-                    resolve();
-                });
-
-                for (connId in connections) {
-                    if (connections[connId]) {
-                        this.isLocal ? connections[connId].destroy() : connections[connId].terminate();
-                    }
-                }
-
-            } else {
-                resolve();
+        connection.on("drain", function () {
+            if (ws && ws._socket) {
+                ws._socket.resume();
+            }
+        });
+        connection.setTimeout(Math.floor(600 * 1000), function () {
+            console.log("local timeout");
+            connection.destroy();
+            if (ws) {
+                return ws.terminate();
             }
         });
     }
+
 }
