@@ -9,7 +9,7 @@ server.version('1.1.8')
     .parse(process.argv);
 
 var relay = new TcpRelay({
-    serverAddress: server.serverAddress || '127.0.0.1',
+    serverAddress: server.serverAddress || '0.0.0.0',
     serverPort: process.env.PORT || server.serverPort || 8088,
     password: server.password || 'shadowsocks-over-websocket',
     method: server.method || 'aes-256-cfb'
