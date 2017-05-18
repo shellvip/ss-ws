@@ -1,0 +1,29 @@
+{
+  "name": "ss-ws",
+  "version": "1.0.0",
+  "description": "ss over ws",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "local": "node local.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shellvip/ss-ws.git"
+  },
+  "keywords": [
+    "ss"
+  ],
+  "author": "sc",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/shellvip/ss-ws/issues"
+  },
+  "homepage": "https://github.com/shellvip/ss-ws#readme",
+  "dependencies": {
+    "commander": "^2.9.0",
+    "shadowsocks": "^1.5.3",
+    "ws": "^3.0.0"
+  }
+}
