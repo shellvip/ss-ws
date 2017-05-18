@@ -16,7 +16,7 @@ var relay = new TcpRelay({
     serverAddress: local.serverAddress || '127.0.0.1',
     serverPort: local.serverPort || 8088,
     password: local.password || 'shadowsocks-over-websocket',
-    method: local.method || 'rc4-md5'
+    method: local.method || 'rc4'
 }, true);
 
 relay.initServer().then(()=>{
