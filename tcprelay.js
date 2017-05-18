@@ -3,7 +3,6 @@ const path = require('path');
 const http = require('http');
 const WebSocket = require('ws');
 const Encryptor = require('shadowsocks/lib/shadowsocks/encrypt').Encryptor;
-const WSErrorCode = require('ws/lib/ErrorCodes');
 
 const MAX_CONNECTIONS = 50000;
 
