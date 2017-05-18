@@ -112,40 +112,41 @@ module.exports = class TcpRelay {
     }
 
     initServer() {
+        var self = this;
         return new Promise(function (resolve, reject) {
-            var config = this.config;
-            var port = this.isLocal ? config.localPort : config.serverPort;
-            var address = this.isLocal ? config.localAddress : config.serverAddress;
+            var config = self.config;
+            var port = self.isLocal ? config.localPort : config.serverPort;
+            var address = self.isLocal ? config.localAddress : config.serverAddress;
             var server;
 
-            if (this.isLocal) {
-                server = this.server = net.createServer({
+            if (self.isLocal) {
+                server = self.server = net.createServer({
                     allowHalfOpen: true,
                 });
                 server.maxConnections = MAX_CONNECTIONS;
                 server.on('connection', function (connection) {
-                    return this.handleConnectionByLocal(connection);
+                    return self.handleConnectionByLocal(connection);
                 });
                 server.on('close', function () {
-                    this.status = SERVER_STATUS_STOPPED;
+                    self.status = SERVER_STATUS_STOPPED;
                 });
                 server.listen(port, address);
             } else {
-                server = this.server = new WebSocket.Server({
+                server = self.server = new WebSocket.Server({
                     host: address,
                     port: port,
                     perMessageDeflate: false
                 });
                 server.on('connection', function (connection) {
-                    return this.handleConnectionByServer(connection);
+                    return self.handleConnectionByServer(connection);
                 });
             }
             server.on('error', function (error) {
-                this.status = SERVER_STATUS_STOPPED;
+                self.status = SERVER_STATUS_STOPPED;
                 reject(error);
             });
             server.on('listening', function () {
-                this.status = SERVER_STATUS_RUNNING;
+                self.status = SERVER_STATUS_RUNNING;
                 resolve();
             });
         });
